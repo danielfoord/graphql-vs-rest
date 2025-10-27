@@ -58,10 +58,10 @@ public class ProductsController : ControllerBase
     public Product Get(int id) => _service.GetById(id);
 
     [HttpPost]
-    public IActionResult Create(Product product)
+    public async Task<IActionResult> Create(Product product)
     {
-        _service.Create(product);
-        return CreatedAtAction(nameof(Get), new { id = product.Id }, product);
+        await _service.Create(product);
+        return Created(nameof(Get), new { id = product.Id }, product);
     }
 }
 ```
