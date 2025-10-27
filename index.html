@@ -62,7 +62,7 @@ clients.</li>
     <span class="hljs-function"><span class="hljs-keyword">public</span> <span class="hljs-keyword">async</span> Task&lt;IActionResult&gt; <span class="hljs-title">Create</span>(<span class="hljs-params">Product product</span>)</span>
     {
         <span class="hljs-keyword">await</span> _service.Create(product);
-        <span class="hljs-keyword">return</span> Created(<span class="hljs-keyword">new</span> { id = product.Id }, product);
+        <span class="hljs-keyword">return</span> Created(<span class="hljs-keyword">nameof</span>(Get), <span class="hljs-keyword">new</span> { id = product.Id }, product);
     }
 }
 </code></pre>
