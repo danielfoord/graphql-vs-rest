@@ -20,8 +20,6 @@ class:
 
 ### A technical deep dive
 
-#### With examples in ASP.NET Core and HotChocolate
-
 ## Agenda
 
 1. What is a Web API?
