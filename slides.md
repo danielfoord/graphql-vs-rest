@@ -45,20 +45,24 @@ class:
 ```csharp
 [ApiController]
 [Route("api/[controller]")]
-public class ProductsController : ControllerBase
+public class ProductsController(AppDbContext db) : ControllerBase
 {
-    private readonly IProductService _service;
-
     [HttpGet]
-    public IEnumerable<Product> Get() => _service.GetAll();
+    public async Task<ActionResult<IEnumerable<Product>>> Get() => 
+        await db.Products.ToListAsync();
 
     [HttpGet("{id}")]
-    public Product Get(int id) => _service.GetById(id);
+    public async Task<ActionResult<Product>> Get(int id)
+    {
+        var product = await db.Products.FindAsync(id);
+        return product is { } p ? p : NotFound();
+    }
 
     [HttpPost]
-    public IActionResult Create(Product product)
+    public async Task<ActionResult<Product>> Create(Product product)
     {
-        _service.Create(product);
+        db.Products.Add(product);
+        await db.SaveChangesAsync();
         return CreatedAtAction(nameof(Get), new { id = product.Id }, product);
     }
 }
@@ -85,6 +89,32 @@ public class ProductsController : ControllerBase
 - Over-fetching / under-fetching problems
 - Multiple round-trips for related data
 - Versioning complexity
+
+## Fetching Related Data
+
+### REST: Resource-based filtering
+- `GET /api/orders?customerId=5`
+- `GET /api/customers?productId=10`
+- **Requires custom controller logic** for every filter/relationship.
+
+### GraphQL: Relationship-based nesting
+```graphql
+query {
+  customer(id: 5) {
+    name
+    orders {
+      id
+      orderDate
+      lineItems {
+        product {
+          name
+        }
+      }
+    }
+  }
+}
+```
+- **Schema-driven traversal**: Client defines the depth and breadth.
 
 ## Enter GraphQL
 
@@ -119,9 +149,17 @@ query {
 ## GraphQL in .NET Core (HotChocolate)
 
 ```csharp
-public class Query
+public class Query(AppDbContext db)
 {
-    public IQueryable<Product> GetProducts([Service] AppDbContext db) => db.Products;
+    [UseProjection]
+    [UseFiltering]
+    [UseSorting]
+    public IQueryable<Product> GetProducts() => db.Products;
+
+    [UseProjection]
+    [UseFirstOrDefault]
+    public IQueryable<Product> GetProduct(int id) => 
+        db.Products.Where(p => p.Id == id);
 }
 
 var builder = WebApplication.CreateBuilder(args);
@@ -142,16 +180,30 @@ type Product {
   id: ID!
   name: String!
   price: Float!
-  category: Category
 }
 
-type Category {
+type Customer {
   id: ID!
   name: String!
+  email: String!
+  orders: [Order!]!
+}
+
+type Order {
+  id: ID!
+  orderDate: String!
+  lineItems: [OrderLineItem!]!
+}
+
+type OrderLineItem {
+  id: ID!
+  quantity: Int!
+  product: Product!
 }
 
 type Query {
   products: [Product!]!
+  customers: [Customer!]!
 }
 ```
 
@@ -161,7 +213,7 @@ Mutations allow data modification.
 
 ```graphql
 mutation {
-  addProduct(input: { name: "Keyboard", price: 49.99, categoryId: 2 }) {
+  addProduct(input: { name: "Keyboard", price: 49.99 }) {
     id
     name
   }
@@ -171,13 +223,13 @@ mutation {
 ## Mutations in HotChocolate
 
 ```csharp
-public record AddProductInput(string Name, double Price, int CategoryId);
+public record AddProductInput(string Name, decimal Price);
 
-public class Mutation
+public class Mutation(AppDbContext db)
 {
-    public async Task<Product> AddProduct(AddProductInput input, [Service] AppDbContext db)
+    public async Task<Product> AddProduct(AddProductInput input)
     {
-        var product = new Product { Name = input.Name, Price = input.Price, CategoryId = input.CategoryId };
+        var product = new Product { Name = input.Name, Price = input.Price };
         db.Products.Add(product);
         await db.SaveChangesAsync();
         return product;
@@ -218,20 +270,18 @@ public class Subscription
 {
     [Subscribe]
     [Topic]
-    public Product OnProductAdded([EventMessage] Product product) => product;
+    public async Task<Product?> OnProductAdded([EventMessage] int id, AppDbContext db) => 
+        await db.Products.FirstOrDefaultAsync(p => p.Id == id);
 }
 
-public class Mutation
+public class Mutation(AppDbContext db, [Service] ITopicEventSender sender)
 {
-    public async Task<Product> AddProduct(
-        AddProductInput input,
-        [Service] AppDbContext db,
-        [Service] ITopicEventSender sender)
+    public async Task<Product> AddProduct(AddProductInput input)
     {
-        var product = new Product { Name = input.Name, Price = input.Price, CategoryId = input.CategoryId };
+        var product = new Product { Name = input.Name, Price = input.Price };
         db.Products.Add(product);
         await db.SaveChangesAsync();
-        await sender.SendAsync(nameof(Subscription.OnProductAdded), product);
+        await sender.SendAsync(nameof(Subscription.OnProductAdded), product.Id);
         return product;
     }
 }
@@ -243,7 +293,8 @@ public class Mutation
 builder.Services.AddGraphQLServer()
     .AddQueryType<Query>()
     .AddMutationType<Mutation>()
-    .AddSubscriptionType<Subscription>();
+    .AddSubscriptionType<Subscription>()
+    .AddInMemorySubscriptions(); // Simple in-memory provider
 
 app.UseWebSockets();
 app.MapGraphQL();
@@ -259,17 +310,17 @@ app.MapGraphQL();
 
 ```graphql
 query {
-  products {
+  customers {
     name
-    category {
-      name
+    orders {
+      orderDate
     }
   }
 }
 ```
 
 HotChocolate translates this into a SQL query selecting only the necessary
-columns.
+columns and related data.
 
 ## Query Projection in Code
 
@@ -283,14 +334,32 @@ builder.Services
 ```
 
 ```csharp
-public class Query
+public class Query(AppDbContext db)
 {
     [UseProjection]
     [UseFiltering]
     [UseSorting]
-    public IQueryable<Product> GetProducts([Service] AppDbContext db) => db.Products;
+    public IQueryable<Product> GetProducts() => db.Products;
+
+    [UseProjection]
+    [UseFiltering]
+    [UseSorting]
+    public IQueryable<Customer> GetCustomers() => db.Customers;
 }
 ```
+
+## Projections vs. DataLoaders
+
+### When to use Projections (`[UseProjection]`)
+- **Same Database:** EF Core can efficiently generate a `JOIN` or subquery.
+- **Single Round-trip:** Fetching shallow 1:1 or 1:N relationships is usually faster in one query.
+- **Simplicity:** Hot Chocolate handles the "stitching" automatically based on the query.
+
+### When to use DataLoaders
+- **Cross-Boundary:** Fetching from different sources (e.g., SQL + REST API).
+- **Custom Logic:** When the resolver contains logic EF Core cannot translate to SQL.
+- **Request Caching:** Prevents fetching the same entity multiple times in one request.
+- **Scale:** Avoids "Cartesian Explosion" in extremely deep or complex nested queries.
 
 ## REST vs GraphQL Summary
 

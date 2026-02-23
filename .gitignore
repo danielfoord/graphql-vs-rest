@@ -1,1 +1,6 @@
 .DS_Store
+demo/demo.db
+demo/demo.db-shm
+demo/demo.db-wal
+demo/bin
+demo/obj
