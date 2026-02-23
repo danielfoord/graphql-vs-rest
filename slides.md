@@ -100,11 +100,13 @@ public class ProductsController(AppDbContext db) : ControllerBase
 ## Fetching Related Data: REST vs GraphQL
 
 ### REST: Resource-based filtering
+- `GET /api/orders`
+- `GET /api/orders/1`
 - `GET /api/orders?customerId=5`
 - `GET /api/customers?productId=10`
 - **Requires custom controller logic** for every relationship.
 
-### GraphQL: Relationship-based nesting
+## GraphQL: Relationship-based nesting
 ```graphql
 query {
   customer(id: 5) {
