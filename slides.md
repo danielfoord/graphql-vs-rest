@@ -97,7 +97,7 @@ public class ProductsController(AppDbContext db) : ControllerBase
 - `GET /api/customers?productId=10`
 - **Requires custom controller logic** for every filter/relationship.
 
-### GraphQL: Relationship-based nesting
+## GraphQL: Relationship-based nesting
 ```graphql
 query {
   customer(id: 5) {
@@ -324,6 +324,8 @@ columns and related data.
 
 ## Query Projection in Code
 
+### Setup
+
 ```csharp
 builder.Services
     .AddGraphQLServer()
@@ -332,6 +334,9 @@ builder.Services
     .AddFiltering()
     .AddSorting();
 ```
+---
+
+### Usage 
 
 ```csharp
 public class Query(AppDbContext db)
