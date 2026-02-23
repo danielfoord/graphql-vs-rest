@@ -25,11 +25,10 @@ class:
 1. What is a Web API?
 2. REST fundamentals
 3. GraphQL fundamentals
-4. Comparing REST and GraphQL
-5. Demo examples in .NET Core
-6. Mutations and Subscriptions
-7. Query Projection in GraphQL
-8. Q&A
+4. Mutations and Subscriptions
+5. Performance: Projections & DataLoaders
+6. Aggregating APIs (Gateway vs Stitching)
+7. Summary & Conclusion
 
 ## What is a Web API?
 
@@ -86,35 +85,9 @@ public class ProductsController(AppDbContext db) : ControllerBase
 
 **Cons:**
 
-- Over-fetching / under-fetching problems
-- Multiple round-trips for related data
+- **Over-fetching / under-fetching problems**
+- **Multiple round-trips** for related data
 - Versioning complexity
-
-## Fetching Related Data
-
-### REST: Resource-based filtering
-- `GET /api/orders?customerId=5`
-- `GET /api/customers?productId=10`
-- **Requires custom controller logic** for every filter/relationship.
-
-## GraphQL: Relationship-based nesting
-```graphql
-query {
-  customer(id: 5) {
-    name
-    orders {
-      id
-      orderDate
-      lineItems {
-        product {
-          name
-        }
-      }
-    }
-  }
-}
-```
-- **Schema-driven traversal**: Client defines the depth and breadth.
 
 ## Enter GraphQL
 
@@ -124,27 +97,35 @@ query {
 - Strongly typed schema
 - Supports queries, mutations, and subscriptions
 
+## Fetching Related Data: REST vs GraphQL
+
+### REST: Resource-based filtering
+- `GET /api/orders?customerId=5`
+- `GET /api/customers?productId=10`
+- **Requires custom controller logic** for every relationship.
+
+### GraphQL: Relationship-based nesting
+```graphql
+query {
+  customer(id: 5) {
+    name
+    orders {
+      id
+      orderDate
+      lineItems {
+        product { name }
+      }
+    }
+  }
+}
+```
+
 ## HotChocolate in .NET
 
 - Open-source GraphQL server for .NET
 - Easy integration with ASP.NET Core
 - Schema-first or code-first
 - Advanced features: filtering, sorting, projections, subscriptions
-
-## Example GraphQL Query
-
-```graphql
-query {
-  products {
-    id
-    name
-    price
-    category {
-      name
-    }
-  }
-}
-```
 
 ## GraphQL in .NET Core (HotChocolate)
 
@@ -164,13 +145,12 @@ public class Query(AppDbContext db)
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Services
-    .AddDbContext<AppDbContext>()
+    .AddDbContextFactory<AppDbContext>(...)
     .AddGraphQLServer()
-    .AddQueryType<Query>();
-
-var app = builder.Build();
-app.MapGraphQL();
-app.Run();
+    .AddQueryType<Query>()
+    .AddProjections()
+    .AddFiltering()
+    .AddSorting();
 ```
 
 ## GraphQL Schema Example
@@ -193,12 +173,6 @@ type Order {
   id: ID!
   orderDate: String!
   lineItems: [OrderLineItem!]!
-}
-
-type OrderLineItem {
-  id: ID!
-  quantity: Int!
-  product: Product!
 }
 
 type Query {
@@ -237,31 +211,11 @@ public class Mutation(AppDbContext db)
 }
 ```
 
-Register the mutation:
-
-```csharp
-builder.Services.AddGraphQLServer()
-    .AddQueryType<Query>()
-    .AddMutationType<Mutation>();
-```
-
 ## GraphQL Subscriptions
 
 - Real-time updates over WebSocket
 - Clients subscribe to events and receive data automatically
 - Perfect for live dashboards or notifications
-
-## Subscriptions Example
-
-```graphql
-subscription {
-  onProductAdded {
-    id
-    name
-    price
-  }
-}
-```
 
 ## Subscriptions in HotChocolate
 
@@ -274,82 +228,48 @@ public class Subscription
         await db.Products.FirstOrDefaultAsync(p => p.Id == id);
 }
 
-public class Mutation(AppDbContext db, [Service] ITopicEventSender sender)
-{
-    public async Task<Product> AddProduct(AddProductInput input)
-    {
-        var product = new Product { Name = input.Name, Price = input.Price };
-        db.Products.Add(product);
-        await db.SaveChangesAsync();
-        await sender.SendAsync(nameof(Subscription.OnProductAdded), product.Id);
-        return product;
-    }
-}
-```
-
-## Adding Subscriptions Support
-
-```csharp
+// In Program.cs
 builder.Services.AddGraphQLServer()
-    .AddQueryType<Query>()
-    .AddMutationType<Mutation>()
+    ...
     .AddSubscriptionType<Subscription>()
-    .AddInMemorySubscriptions(); // Simple in-memory provider
+    .AddInMemorySubscriptions();
 
 app.UseWebSockets();
-app.MapGraphQL();
 ```
 
-## Query Projection in GraphQL
+## Performance: Projections
 
 - GraphQL lets the client specify which fields to return.
 - HotChocolate supports automatic projection to EF Core.
 - Prevents over-fetching and optimizes database queries.
 
-## Example Query Projection
-
 ```graphql
 query {
   customers {
     name
-    orders {
-      orderDate
-    }
+    orders { orderDate }
   }
 }
 ```
 
-HotChocolate translates this into a SQL query selecting only the necessary
-columns and related data.
+HotChocolate translates this into a SQL query selecting **only** the necessary
+columns and related data via JOINs.
 
-## Query Projection in Code
+## Performance: DataLoaders
 
-### Setup
+### The N+1 Problem
+If you have a resolver for a child property, it might execute one query for every parent record.
 
-```csharp
-builder.Services
-    .AddGraphQLServer()
-    .AddQueryType<Query>()
-    .AddProjections()
-    .AddFiltering()
-    .AddSorting();
-```
----
-
-### Usage 
+### The Solution: Batching
+DataLoaders collect IDs and fetch them in a single batch.
 
 ```csharp
-public class Query(AppDbContext db)
+public class ProductByIdDataLoader : BatchDataLoader<int, Product>
 {
-    [UseProjection]
-    [UseFiltering]
-    [UseSorting]
-    public IQueryable<Product> GetProducts() => db.Products;
-
-    [UseProjection]
-    [UseFiltering]
-    [UseSorting]
-    public IQueryable<Customer> GetCustomers() => db.Customers;
+    protected override async Task<IReadOnlyDictionary<int, Product>> LoadBatchAsync(...)
+    {
+        return await db.Products.Where(p => keys.Contains(p.Id)).ToDictionaryAsync(...);
+    }
 }
 ```
 
@@ -357,14 +277,48 @@ public class Query(AppDbContext db)
 
 ### When to use Projections (`[UseProjection]`)
 - **Same Database:** EF Core can efficiently generate a `JOIN` or subquery.
-- **Single Round-trip:** Fetching shallow 1:1 or 1:N relationships is usually faster in one query.
-- **Simplicity:** Hot Chocolate handles the "stitching" automatically based on the query.
+- **Single Round-trip:** Fetching shallow relationships is faster in one query.
+- **Simplicity:** Automatic "stitching" based on the query.
 
 ### When to use DataLoaders
 - **Cross-Boundary:** Fetching from different sources (e.g., SQL + REST API).
-- **Custom Logic:** When the resolver contains logic EF Core cannot translate to SQL.
-- **Request Caching:** Prevents fetching the same entity multiple times in one request.
-- **Scale:** Avoids "Cartesian Explosion" in extremely deep or complex nested queries.
+- **Custom Logic:** When the resolver logic cannot be translated to SQL.
+- **Request Caching:** Prevents fetching the same entity twice in one request.
+
+## Aggregating APIs: REST vs GraphQL
+
+- Multi-service architectures often require clients to fetch data from multiple backends.
+- Two common approaches: **API Gateway** (REST) vs **Schema Stitching** (GraphQL).
+
+---
+
+### REST: API Gateway
+<div class="mermaid">
+  graph LR
+    A[Client] -->|HTTP| B[API Gateway]
+    B -->|Route| C[Service 1]
+    B -->|Route| D[Service 2]
+</div>
+
+### GraphQL: Schema Stitching
+<div class="mermaid">
+    graph LR
+    F[Client] -->|Query| G[Unified Schema Gateway]
+    G -->|Delegate| H[Service 1]
+    G -->|Delegate| I[Service 2]
+</div>
+
+## Aggregation Comparison
+
+**REST → API Gateway**
+- Single entry point routing requests.
+- Handles auth, caching, rate-limiting.
+- Fixed data shapes; over-/under-fetching still possible.
+
+**GraphQL → Schema Stitching / Federation**
+- Combines multiple schemas into one unified API.
+- Clients query multiple services in **one single request**.
+- Avoids multiple round-trips and over-fetching.
 
 ## REST vs GraphQL Summary
 
@@ -373,187 +327,28 @@ public class Query(AppDbContext db)
 | Endpoint   | Multiple            | Single           |
 | Data Shape | Fixed               | Client-defined   |
 | Versioning | URL-based           | Schema evolution |
-| Real-time  | Webhooks            | Subscriptions    |
+| Real-time  | Webhooks / Polling  | Subscriptions    |
 | Efficiency | Over/Under fetching | Exact fetching   |
 
 ## When to Use Which?
 
 **REST**
-
-- Simpler public APIs
-- Caching and CDN-friendly
-- Easier for microservices
+- Simple, stable APIs.
+- Public APIs requiring standard HTTP caching.
+- Standard microservice-to-microservice communication.
 
 **GraphQL**
-
-- Complex data relationships
-- Multiple frontends (web, mobile)
-- Real-time requirements
-- Need for query flexibility
-
-## Aggregating APIs: REST vs GraphQL
-
-- Multi-service architectures often require clients to get data from multiple
-  backends
-- Two common approaches: API Gateway for REST, Schema Stitching for GraphQL
-
-## Aggregating APIs - REST
-
-<div class="mermaid">
-  graph LR
-   subgraph REST [REST API Aggregation]
-        A[Client] -->|HTTP requests| B[API Gateway]
-        B -->|Routes request| C[Service 1]
-        B -->|Routes request| D[Service 2]
-        B -->|Routes request| E[Service 3]
-    end
-</div>
-
-## Aggregating APIs - GraphQL
-
-<div class="mermaid">
-    graph LR
-    subgraph GraphQL [GraphQL Schema Stitching]
-        F[Client] -->|GraphQL query| G[Unified GraphQL Schema]
-        G -->|Delegates query| H[Service 1 GraphQL]
-        G -->|Delegates query| I[Service 2 GraphQL]
-        G -->|Delegates query| J[Service 3 GraphQL]
-    end
-</div>
-
-## Aggregation Comparison
-
-**REST → API Gateway**
-
-- Single entry point routing requests to multiple REST services
-- Handles cross-cutting concerns: auth, caching, rate-limiting
-- Fixed data shapes per service; over-/under-fetching can occur
-- Client still needs to make multiple requests to different services
-
-## Aggregation Comparison
-
-**GraphQL → Schema Stitching**
-
-- Combines multiple GraphQL schemas into one unified schema
-- Single strongly-typed GraphQL endpoint
-- Clients can query multiple services in a single request
-- Avoids multiple round-trips and over-/under-fetching
-- Complexity increases with many services; requires careful dependency
-  management
-
-## Schema Stitching: Before — GraphQL Schemas
-
-**Products Service**
-
-```graphql
-type Product {
-  id: ID!
-  name: String!
-  price: Float!
-}
-
-type Query {
-  products: [Product!]!
-}
-```
-
----
-
-**Reviews Service**
-
-```graphql
-type Review {
-  id: ID!
-  productId: ID!
-  rating: Int!
-  comment: String
-}
-
-type Query {
-  reviewsByProduct(productId: ID!): [Review!]!
-}
-```
-
-- Services are independent
-- Client must query products and reviews separately
-
-## Schema Stitching: After — Unified GraphQL Schema
-
-```graphql
-type Product {
-  id: ID!
-  name: String!
-  price: Float!
-  reviews: [Review!]!   # delegated to Reviews Service
-}
-
-type Review {
-  id: ID!
-  rating: Int!
-  comment: String
-}
-
-type Query {
-  products: [Product!]!
-}
-```
-
----
-
-**Client Query Example**
-
-```graphql
-query {
-  products {
-    id
-    name
-    price
-    reviews {
-      rating
-      comment
-    }
-  }
-}
-```
-
-- Single query hits multiple services
-- `reviews` field added only at the gateway
-- Services remain independent
+- Complex data relationships & deep nesting.
+- Multiple frontends with different data needs.
+- Real-time requirement (Subscriptions).
+- Aggregating multiple backends into one query.
 
 ## Conclusion: Key Takeaways
 
-- **REST APIs**
-  - Simple, mature, and widely supported
-  - Works well with fixed data shapes and caching/CDNs
-  - Easy to implement for microservices and public APIs
-  - Limitations: over-/under-fetching, multiple round-trips for related data,
-    versioning complexity
-
----
-
-- **GraphQL APIs**
-  - Flexible and client-driven: clients specify exact data requirements
-  - Strongly-typed schema supports complex relationships
-  - Reduces over-/under-fetching and multiple network calls
-  - Supports real-time updates via subscriptions
-  - Advanced features in HotChocolate: projections, filtering, sorting, schema
-    stitching
-
----
-
-- **Aggregating Multi-Service Architectures**
-  - REST: API Gateway centralizes routing, auth, caching, and rate-limiting
-  - GraphQL: Schema Stitching provides a unified, strongly-typed endpoint
-  - GraphQL allows querying multiple services in a single request without
-    breaking service boundaries
-
----
-
-- **Choosing Between REST and GraphQL**
-  - Use **REST** for simple, stable APIs with predictable data shapes
-  - Use **GraphQL** for complex data relationships, multiple clients, or
-    real-time requirements
-  - HotChocolate in .NET makes implementing GraphQL practical and efficient
+- **REST** is mature and simple, but suffers from data fetching inefficiencies in complex UIs.
+- **GraphQL** empowers clients to fetch exactly what they need in one call.
+- **HotChocolate** brings enterprise-grade GraphQL features to .NET with minimal boilerplate.
+- **Projections** optimize database calls, while **DataLoaders** solve the N+1 problem and enable cross-service data fetching.
 
 # Thank You
 
